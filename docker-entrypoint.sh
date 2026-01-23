@@ -14,17 +14,17 @@ if [ -n "$DATABASE_URL" ]; then
     # Parse DATABASE_URL to extract host and port
     DB_HOST=$(echo $DATABASE_URL | sed -n 's/.*@\([^:]*\):.*/\1/p')
     DB_PORT=$(echo $DATABASE_URL | sed -n 's/.*:\([0-9]*\)\/.*/\1/p')
-    
+
     echo "Database host: $DB_HOST"
     echo "Database port: $DB_PORT"
-    
+
     # Wait for PostgreSQL to be ready
     until pg_isready -h "$DB_HOST" -p "$DB_PORT" > /dev/null 2>&1 || [ $retry_count -eq $max_retries ]; do
         retry_count=$((retry_count + 1))
         echo "Waiting for database... (attempt $retry_count/$max_retries)"
         sleep 2
     done
-    
+
     if [ $retry_count -eq $max_retries ]; then
         echo "Warning: Could not connect to database after $max_retries attempts. Proceeding anyway..."
     else
@@ -57,4 +57,5 @@ exec /app/.venv/bin/python -m uvicorn app.main:app \
     --port "$APP_PORT" \
     --workers 1 \
     --log-level info
+
 

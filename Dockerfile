@@ -35,6 +35,7 @@ ENV PYTHONUNBUFFERED=1 \
 # Install runtime dependencies for PostgreSQL
 RUN apt-get update && apt-get install -y \
     libpq5 \
+    postgresql-client \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
