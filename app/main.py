@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.core.config import settings
 from app.database.connection import db
-from app.api import todos, users, columns, tasks
+from app.api import api_router
 
 
 @asynccontextmanager
@@ -32,11 +32,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers with /api prefix
-app.include_router(todos.router, prefix="/api")
-app.include_router(users.router, prefix="/api")
-app.include_router(columns.router, prefix="/api")
-app.include_router(tasks.router, prefix="/api")
+# Include the API router (which contains all resource routers)
+app.include_router(api_router)
 
 
 @app.get("/")
