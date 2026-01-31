@@ -203,17 +203,16 @@ jobs:
           ref: ${{ inputs.version }}
           fetch-depth: 0
 
-      - name: Create git tag
+      - name: Verify git tag exists
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           if git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "ℹ️  Tag ${{ inputs.version }} already exists"
+            echo "ℹ️  Tag ${{ inputs.version }} exists and will be used for the release"
           else
-            git tag -a "${{ inputs.version }}" -m "Release ${{ inputs.version }} deployed to ${{ inputs.environment }}"
-            git push origin "${{ inputs.version }}"
-            echo "✅ Created and pushed tag ${{ inputs.version }}"
+            echo "❌ Tag ${{ inputs.version }} does not exist. This workflow expects an existing tag."
+            exit 1
           fi
 
       - name: Create GitHub Release
