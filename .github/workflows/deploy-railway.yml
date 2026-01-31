@@ -1,0 +1,255 @@
+name: Deploy to Railway Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to deploy (e.g., v1.0.0)'
+        required: true
+        type: string
+      environment:
+        description: 'Railway environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - production
+          - staging
+        default: 'production'
+
+env:
+  SERVICE_NAME: todo-demo-backend
+
+jobs:
+  validate:
+    name: Validate Version Tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag exists
+        run: |
+          echo "Checking if tag '${{ inputs.version }}' exists..."
+
+          if ! git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "❌ Tag '${{ inputs.version }}' does not exist in the repository"
+            echo ""
+            echo "Available tags:"
+            git tag -l | tail -20
+            echo ""
+            echo "Please create the tag first or use an existing tag."
+            exit 1
+          fi
+
+          echo "✅ Tag '${{ inputs.version }}' exists"
+
+      - name: Validate semantic versioning format
+        run: |
+          if [[ ! "${{ inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$ ]]; then
+            echo "⚠️  Warning: Version format '${{ inputs.version }}' does not follow semantic versioning"
+            echo "Recommended format: v1.0.0, v1.2.3-beta, etc."
+            echo "Continuing anyway..."
+          else
+            echo "✅ Version format is valid: ${{ inputs.version }}"
+          fi
+
+  get-commit-hash:
+    name: Get Commit Hash for Tag
+    runs-on: ubuntu-latest
+    needs: validate
+    outputs:
+      commit_hash: ${{ steps.get-hash.outputs.commit_hash }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 0
+
+      - name: Get commit hash from tag
+        id: get-hash
+        run: |
+          COMMIT_SHA=$(git rev-list -n 1 ${{ inputs.version }})
+          COMMIT_HASH=$(echo $COMMIT_SHA | cut -c1-7)
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "✅ Captured commit hash for tag ${{ inputs.version }}: $COMMIT_HASH (full: $COMMIT_SHA)"
+
+  deploy:
+    name: Deploy to Railway
+    runs-on: ubuntu-latest
+    needs: get-commit-hash
+    container: ghcr.io/railwayapp/cli:latest
+    # environment: ${{ inputs.environment }}  # Commented out to use repository secrets
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version }}
+
+      - name: Set COMMIT_HASH Environment Variable on Railway
+        run: |
+          echo "Setting COMMIT_HASH=${{ needs.get-commit-hash.outputs.commit_hash }} on Railway..."
+          railway variables --service=${{ secrets.RAILWAY_SERVICE_ID }} --set "COMMIT_HASH=${{ needs.get-commit-hash.outputs.commit_hash }}"
+
+      - name: Deploy to Railway
+        run: |
+          echo "🚀 Deploying ${{ env.SERVICE_NAME }} version ${{ inputs.version }} to ${{ inputs.environment }}..."
+          echo "📝 Commit Hash: ${{ needs.get-commit-hash.outputs.commit_hash }}"
+          railway up \
+            --service=${{ secrets.RAILWAY_SERVICE_ID }} \
+            --detach
+          echo "✅ Deployment initiated successfully"
+
+      - name: Wait for deployment to stabilize
+        run: |
+          echo "⏳ Waiting 45 seconds for deployment to stabilize..."
+          sleep 45
+
+  verify:
+    name: Verify Deployment
+    runs-on: ubuntu-latest
+    needs: deploy
+    container: ghcr.io/railwayapp/cli:latest
+    # environment: ${{ inputs.environment }}  # Commented out to use repository secrets
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - name: Get service URL
+        id: get-url
+        run: |
+          echo "Fetching service URL from Railway..."
+          SERVICE_URL=$(railway domain --service=${{ secrets.RAILWAY_SERVICE_ID }} 2>/dev/null || echo "")
+
+          if [ -z "$SERVICE_URL" ]; then
+            echo "⚠️  No public domain found for service"
+            echo "Skipping health check - service may not have a public URL"
+            echo "url=" >> $GITHUB_OUTPUT
+          else
+            echo "url=$SERVICE_URL" >> $GITHUB_OUTPUT
+            echo "✅ Service URL: https://$SERVICE_URL"
+          fi
+
+      - name: Health check
+        if: steps.get-url.outputs.url != ''
+        run: |
+          SERVICE_URL="${{ steps.get-url.outputs.url }}"
+          echo "🏥 Running health check on https://$SERVICE_URL/health"
+
+          MAX_RETRIES=10
+          RETRY_DELAY=10
+
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i/$MAX_RETRIES..."
+
+            if curl -f -s -m 10 "https://$SERVICE_URL/health" | grep -q "ok"; then
+              echo "✅ Health check passed! Service is responding correctly."
+              exit 0
+            fi
+
+            if [ $i -lt $MAX_RETRIES ]; then
+              echo "⏳ Health check failed, retrying in ${RETRY_DELAY}s..."
+              sleep $RETRY_DELAY
+            fi
+          done
+
+          echo "❌ Health check failed after $MAX_RETRIES attempts"
+          echo "Service may still be starting up or experiencing issues"
+          exit 1
+
+      - name: Check deployment logs
+        if: failure()
+        run: |
+          echo "📋 Fetching recent deployment logs..."
+          railway logs --service=${{ secrets.RAILWAY_SERVICE_ID }} || true
+
+
+  rollback:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: [deploy, verify]
+    if: failure()
+    container: ghcr.io/railwayapp/cli:latest
+    # environment: ${{ inputs.environment }}  # Commented out to use repository secrets
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - name: Rollback deployment
+        run: |
+          echo "⚠️  Deployment verification failed, initiating rollback..."
+          railway rollback --service=${{ secrets.RAILWAY_SERVICE_ID }} || {
+            echo "❌ Rollback failed - manual intervention may be required"
+            exit 1
+          }
+          echo "✅ Rollback completed successfully"
+
+      - name: Notify rollback
+        run: |
+          echo "🔔 Deployment of version ${{ inputs.version }} was rolled back"
+
+  tag-release:
+    name: Tag Release
+    runs-on: ubuntu-latest
+    needs: verify
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 0
+
+      - name: Create git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "ℹ️  Tag ${{ inputs.version }} already exists"
+          else
+            git tag -a "${{ inputs.version }}" -m "Release ${{ inputs.version }} deployed to ${{ inputs.environment }}"
+            git push origin "${{ inputs.version }}"
+            echo "✅ Created and pushed tag ${{ inputs.version }}"
+          fi
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ inputs.version }}
+          release_name: Release ${{ inputs.version }}
+          body: |
+            ## 🚀 Deployment Summary
+
+            **Version:** `${{ inputs.version }}`
+            **Environment:** `${{ inputs.environment }}`
+            **Service:** `${{ env.SERVICE_NAME }}`
+            **Triggered by:** @${{ github.actor }}
+
+            ### ✅ Deployment Status
+            - Validation: Passed
+            - Railway Deployment: Success
+            - Health Check: See verify job logs (may be skipped if no public domain is configured)
+            - Release Tagged: Yes
+
+            ### 📦 Components Deployed
+            - FastAPI backend with automatic database migrations
+            - Health check endpoint: `/health`
+            - API endpoints: `/api/*`
+            - Database: PostgreSQL with Alembic migrations
+
+            ### 🔧 Configuration
+            Environment variables are managed through Railway's dashboard:
+            - `DATABASE_URL`: PostgreSQL connection string (auto-set by Railway)
+            - `PORT`: Service port (auto-set by Railway)
+            - `ALLOWED_ORIGINS`: Frontend domains (comma-separated)
+            - `PROJECT_NAME`: Application name
+            - `VERSION`: Application version
+          draft: false
+          prerelease: ${{ contains(inputs.version, '-') }}
+
