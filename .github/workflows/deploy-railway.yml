@@ -79,7 +79,7 @@ jobs:
   deploy:
     name: Deploy to Railway
     runs-on: ubuntu-latest
-    needs: validate
+    needs: get-commit-hash
     container: ghcr.io/railwayapp/cli:latest
     # environment: ${{ inputs.environment }}  # Commented out to use repository secrets
     env:
